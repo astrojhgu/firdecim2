@@ -1,4 +1,4 @@
-use firdecim2::resample2_complex;
+use firdecim2::firdec_worker::resample2_complex;
 use num::{Complex, Zero};
 
 fn main() {
