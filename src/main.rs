@@ -27,7 +27,8 @@ fn main() {
 
     //input[4096]=Complex::<_>::new(1, 1);
 
-    for _ in 0..800000 {
+    for i in 0..800000 {
+        input[1000]=Complex::new((i%127) as i8, 0);
         resample2_complex(&input, &mut output, &fir_coeffs, &mut state, 0);
     }
 }

@@ -1,6 +1,7 @@
 use num::traits::AsPrimitive;
 use num::{Complex, Zero};
 
+
 /// Decimate-by-2 halfband FIR filter
 /// Optimized for branch-free SIMD via continuous window.
 #[inline]
@@ -10,7 +11,7 @@ pub fn resample2_complex<S, T>(
     coeff: &[T],
     state: &mut [Complex<T>],
     bit_shift: u32,
-) -> usize
+)
 where
     S: Copy + AsPrimitive<T>,
     T: 'static
@@ -133,12 +134,12 @@ where
     // (保持不变，已是高效的切片复制)
     let input_start_idx = input_t.len() - state_len;
     state.copy_from_slice(&input_t[input_start_idx..]);
-
-    n_out
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::io::Write;
     use super::resample2_complex;
     use num::Complex;
     use num::traits::FloatConst;
@@ -210,9 +211,11 @@ mod tests {
             &mut state,
             0,
         );
+
+        let mut outfile=File::create("./sin.txt").unwrap();
         output1.iter().zip(output2.iter()).for_each(|(a, b)| {
             assert_eq!(a, b);
-            println!("{} {}", a, b);
+            writeln!(&mut outfile, "{} {}", a.re, b.re);
         });
     }
 
