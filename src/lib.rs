@@ -7,18 +7,19 @@ use num::traits::AsPrimitive;
 /// coeff:  &[T]  (halfband FIR, mid tap == 0.5 or similar)
 /// state:  filter delay line, len = coeff.len() - 1
 
-/// Halfband FIR decimate-by-2 for complex IQ samples
+
+/// Optimized safe version: pre-convert input -> T, prebuild window, pre-extract odd coeffs.
+/// Not SIMD, but branch-free in inner loop and avoids per-sample conversions.
 pub fn resample2_complex<S, T>(
     input: &[Complex<S>],
     output: &mut [Complex<T>],
     coeff: &[T],
     state: &mut [Complex<T>],
     bit_shift: u32,
-)
+) -> usize
 where
     S: Copy + AsPrimitive<T>,
-    T: 'static
-        + Copy
+    T: 'static+Copy
         + Zero
         + std::ops::AddAssign
         + std::ops::Mul<Output = T>
@@ -26,63 +27,99 @@ where
         + std::ops::Shr<u32, Output = T>,
 {
     let ntaps = coeff.len();
+    assert!(ntaps % 2 == 1);
     let mid = ntaps / 2;
     let state_len = ntaps - 1;
-
-    assert!(ntaps % 2 == 1);
-    assert!(input.len() % 2 == 0);
     assert_eq!(state.len(), state_len);
 
+    assert!(input.len() % 2 == 0);
     let n_out = input.len() / 2;
+    assert!(output.len() >= n_out);
 
+    // 1) Pre-convert input S -> T once into a contiguous buffer
+    //    Reuse a buffer allocated on caller if you want zero alloc; here we allocate for clarity.
+    let mut input_t: Vec<Complex<T>> = Vec::with_capacity(input.len());
+    for x in input.iter() {
+        input_t.push(Complex::new(x.re.as_(), x.im.as_()));
+    }
+
+    // 2) Build window = [state (len state_len) , input_t (len input.len())] as single Vec
+    //    We reuse a Vec so indexes become absolute and branch-free.
+    let mut window: Vec<Complex<T>> = Vec::with_capacity(state_len + input_t.len());
+    window.extend_from_slice(&state[..]); // copy state into window
+    window.extend_from_slice(&input_t[..]); // then the converted input
+
+    // 3) Pre-extract odd taps (offsets and coeffs)
+    //    We will store pairs (k,c) where k is odd offset from mid: k=1,3,5...
+    let mut odd_offsets: Vec<usize> = Vec::new(); // k values
+    let mut odd_coeffs: Vec<T> = Vec::new();
+    for k in (1..=mid).step_by(2) {
+        odd_offsets.push(k);
+        // coeff at index (mid-k) or (mid+k) because symmetric; we choose mid-k
+        odd_coeffs.push(coeff[mid - k]);
+    }
+
+    // 4) Core loop: for each output i compute pos = 2*i + mid, and use window[pos +/- k] branch-free
     for i in 0..n_out {
-        let pos = 2 * i + mid;       // 相对于 “state + input” 的逻辑 pos
-        let in_base = pos as isize - state_len as isize;
+        let pos = 2 * i + mid; // index into window
+        // center
+        let center = window[pos];
+        let mut acc_re = coeff[mid] * center.re;
+        let mut acc_im = coeff[mid] * center.im;
 
-        // 中心 sample
-        let xc = if in_base < 0 {
-            state[pos]
-        } else {
-            let x = &input[in_base as usize];
-            Complex::new(x.re.as_(), x.im.as_())
-        };
+        // iterate odd taps
+        // small unrolling: process in chunks of 4 offsets to help auto-vectorizer
+        let mut j = 0usize;
+        let n_odd = odd_offsets.len();
+        while j + 3 < n_odd {
+            let k0 = odd_offsets[j];
+            let k1 = odd_offsets[j + 1];
+            let k2 = odd_offsets[j + 2];
+            let k3 = odd_offsets[j + 3];
 
-        let mut acc_re = coeff[mid] * xc.re;
-        let mut acc_im = coeff[mid] * xc.im;
+            let c0 = odd_coeffs[j];
+            let c1 = odd_coeffs[j + 1];
+            let c2 = odd_coeffs[j + 2];
+            let c3 = odd_coeffs[j + 3];
 
-        // 奇数 taps
-        for k in (1..=mid).step_by(2) {
-            let idx_l = pos - k;
-            let idx_r = pos + k;
+            let x0l = window[pos - k0]; let x0r = window[pos + k0];
+            let x1l = window[pos - k1]; let x1r = window[pos + k1];
+            let x2l = window[pos - k2]; let x2r = window[pos + k2];
+            let x3l = window[pos - k3]; let x3r = window[pos + k3];
 
-            let xl = if idx_l < state_len {
-                state[idx_l]
-            } else {
-                let x = &input[(idx_l - state_len) as usize];
-                Complex::new(x.re.as_(), x.im.as_())
-            };
+            acc_re += c0 * (x0l.re + x0r.re);
+            acc_im += c0 * (x0l.im + x0r.im);
 
-            let xr = if idx_r < state_len {
-                state[idx_r]
-            } else {
-                let x = &input[(idx_r - state_len) as usize];
-                Complex::new(x.re.as_(), x.im.as_())
-            };
+            acc_re += c1 * (x1l.re + x1r.re);
+            acc_im += c1 * (x1l.im + x1r.im);
 
-            let c = coeff[mid - k];
+            acc_re += c2 * (x2l.re + x2r.re);
+            acc_im += c2 * (x2l.im + x2r.im);
+
+            acc_re += c3 * (x3l.re + x3r.re);
+            acc_im += c3 * (x3l.im + x3r.im);
+
+            j += 4;
+        }
+        while j < n_odd {
+            let k = odd_offsets[j];
+            let c = odd_coeffs[j];
+            let xl = window[pos - k];
+            let xr = window[pos + k];
             acc_re += c * (xl.re + xr.re);
             acc_im += c * (xl.im + xr.im);
+            j += 1;
         }
 
         output[i] = Complex::new(acc_re >> bit_shift, acc_im >> bit_shift);
     }
 
-    // 更新状态
-    state.copy_from_slice(&input[input.len() - state_len..]
-        .iter()
-        .map(|x| Complex::new(x.re.as_(), x.im.as_()))
-        .collect::<Vec<_>>());
+    // 5) Update state: copy last `state_len` samples from window (which correspond to tail of input)
+    let tot = window.len();
+    let start = tot - state_len;
+    state.copy_from_slice(&window[start..start + state_len]);
 
+    n_out
 }
 
 
