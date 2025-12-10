@@ -14,7 +14,7 @@ pub fn resample2_complex<S, T>(
     coeff: &[T],
     state: &mut [Complex<T>],
     bit_shift: u32,
-) -> usize
+)
 where
     S: Copy + AsPrimitive<T>,
     T: 'static
@@ -83,5 +83,55 @@ where
         .map(|x| Complex::new(x.re.as_(), x.im.as_()))
         .collect::<Vec<_>>());
 
-    n_out
+}
+
+
+#[cfg(test)]
+mod tests{
+    use super::resample2_complex;
+    use num::Complex;
+    use num::traits::Zero;
+    use num::traits::FloatConst;
+
+
+    fn fir_coeffs()->Vec<i32>{
+        vec![-26,0,28,0,-31,0,36,0,-44,0,53,0,-65,0,79,0,-97,0,117,0,-140,0,167,0,-198,0,234,0,-274,0,319,0,-371,0,429,0,-496,0,572,0,-661,0,764,0,-887,0,1036,0,-1219,0,1454,0,-1768,0,2212,0,-2897,0,4112,0,-6917,0,20848,32767,20848,0,-6917,0,4112,0,-2897,0,2212,0,-1768,0,1454,0,-1219,0,1036,0,-887,0,764,0,-661,0,572,0,-496,0,429,0,-371,0,319,0,-274,0,234,0,-198,0,167,0,-140,0,117,0,-97,0,79,0,-65,0,53,0,-44,0,36,0,-31,0,28,0,-26]
+    }
+
+    #[test]
+    fn unit_pulse(){
+        let fir_coeffs=fir_coeffs();
+
+        let mut state:Vec<_>=vec![Complex::zero(); fir_coeffs.len()-1];
+        let mut input=vec![Complex::<i8>::zero(); fir_coeffs.len()+1];
+        input[0]=Complex::new(1,0);
+        let mut output=vec![Complex::zero(); input.len()/2];
+        resample2_complex(&input, &mut output, &fir_coeffs, &mut state, 0);        
+        fir_coeffs.as_slice().iter().step_by(2).zip(output.iter()).for_each(|(&a,&b)|{
+            assert_eq!(a, b.re);
+            println!("{} {}", a, b.re);
+        });
+    }
+
+    #[test]
+    fn boundary_test(){
+        let fir_coeffs=fir_coeffs();
+
+        let mut state:Vec<Complex<i32>>=vec![Complex::zero(); fir_coeffs.len()-1];
+        let input :Vec<_>=(0..8192).map(|i| Complex::new((127.0*(((i as f64/128.0)*2.0*f64::PI())).sin()) as i8, 0)).collect();
+        let mut output1=vec![Complex::zero(); input.len()/2];
+
+        resample2_complex(&input, &mut output1, &fir_coeffs, &mut state, 0);
+        let mut state:Vec<Complex<i32>>=vec![Complex::zero(); fir_coeffs.len()-1];
+
+        let mut output2=vec![Complex::zero(); input.len()/2];
+        resample2_complex(&input[0..4000], &mut output2[0..2000], &fir_coeffs, &mut state, 0);
+
+        resample2_complex(&input[4000..], &mut output2[2000..], &fir_coeffs, &mut state, 0);
+        output1.iter().zip(output2.iter()).for_each(|(a,b)|{
+            assert_eq!(a,b);
+            println!("{} {}", a,b);
+        });
+
+    }
 }
