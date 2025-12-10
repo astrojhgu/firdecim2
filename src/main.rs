@@ -1,6 +1,6 @@
 use firdecim2::firdec_worker::resample2_complex;
 use num::{Complex, Zero};
-
+use std::hint::black_box;
 fn main() {
     let fir_coeffs = vec![
         -26, 0, 28, 0, -31, 0, 36, 0, -44, 0, 53, 0, -65, 0, 79, 0, -97, 0, 117, 0, -140, 0, 167,
@@ -27,8 +27,9 @@ fn main() {
 
     //input[4096]=Complex::<_>::new(1, 1);
 
-    for i in 0..800000 {
+    for i in 0..(640_000_000 / 8192) {
         input[1000]=Complex::new((i%127) as i8, 0);
         resample2_complex(&input, &mut output, &fir_coeffs, &mut state, 0);
+        black_box(&output);
     }
 }
