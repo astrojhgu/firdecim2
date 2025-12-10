@@ -1,5 +1,4 @@
 use firdecim2::resample2_complex;
-use num::traits::FloatConst;
 use num::{Complex, Zero};
 
 fn main() {
@@ -28,7 +27,7 @@ fn main() {
 
     //input[4096]=Complex::<_>::new(1, 1);
 
-    for _ in 0..80000 {
+    for _ in 0..800000 {
         resample2_complex(&input, &mut output, &fir_coeffs, &mut state, 0);
     }
 }
