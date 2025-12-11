@@ -1,7 +1,13 @@
 use rayon::prelude::*;
 use std::simd::{Simd, num::SimdInt};
 
-/// 16-lane SIMD + Rayon 并行迭代 halfband decimator
+/// =============================================
+/// SIMD LANE 数，统一在此修改
+/// =============================================
+pub const LANES: usize = 16;
+
+/// 2:1 half-band decimator, using lane-parameterized SIMD and Rayon  
+/// 要求：input.len() == 2 * output.len()，且 output.len() % LANES == 0
 pub fn resample2(
     input: &[i16],
     output: &mut [i16],
@@ -20,59 +26,71 @@ pub fn resample2(
 
     assert_eq!(n_input, n_output * 2);
     assert_eq!(state.len(), required_state_len);
-    assert_eq!(n_output % 16, 0);
-    assert_eq!(n_input % 32, 0);
+    assert_eq!(n_output % LANES, 0);
+    assert_eq!(n_input % (LANES * 2), 0);
 
-    // 状态拷贝
+    // 状态更新
     state[n_old_state..required_state_len].copy_from_slice(input);
+
     let state_slice = state.as_ref();
     let coeff_slice = coeff.as_ref();
 
-    type I16x16 = Simd<i16, 16>;
-    type I64x16 = Simd<i64, 16>;
+    // 统一 lane 类型
+    type I16s = Simd<i16, LANES>;
+    type I32s = Simd<i32, LANES>;
 
-    let center_coeff = I64x16::splat(coeff[0] as i64);
-    let shift_vec = I64x16::splat(bit_shift as i64);
+    let center_coeff = I32s::splat(coeff[0] as i32);
+    let shift_vec = I32s::splat(bit_shift as i32);
 
-    // 并行迭代 output 块，每个块 16 个输出
-    output.par_chunks_mut(16).enumerate().for_each(|(chunk_idx, out_chunk)| {
-        let out_idx = chunk_idx * 16;
-        let mut acc = I64x16::splat(0);
+    // 每 chunk = LANES 输出样本
+    output.par_chunks_mut(LANES).enumerate().for_each(|(chunk_idx, out_chunk)| {
+        let out_idx = chunk_idx * LANES;
+        let mut acc = I32s::splat(0);
 
-        // --- 中心 tap h[0] ---
-        let mut center_vals = [0i64; 16];
-        for i in 0..16 {
-            center_vals[i] = state_slice[(2 * (out_idx + i)) + m_half] as i64;
+        // ---------------------------
+        // 中心 tap h[0]
+        // ---------------------------
+        let mut center_buf = [0i32; LANES];
+        for i in 0..LANES {
+            center_buf[i] = state_slice[(2 * (out_idx + i)) + m_half] as i32;
         }
-        acc += I64x16::from_array(center_vals) * center_coeff;
+        acc += I32s::from_array(center_buf) * center_coeff;
 
-        // --- 奇数 taps ---
+        // ---------------------------
+        // 奇数 tap (1,3,5,...)
+        // ---------------------------
         for k in (1..=m_half).step_by(2) {
-            let c = I64x16::splat(coeff_slice[k] as i64);
+            let c = I32s::splat(coeff_slice[k] as i32);
 
-            let mut pos_vals = [0i64; 16];
-            let mut neg_vals = [0i64; 16];
+            let mut pos_buf = [0i32; LANES];
+            let mut neg_buf = [0i32; LANES];
 
-            for i in 0..16 {
-                let center_idx = (2 * (out_idx + i)) + m_half;
-                pos_vals[i] = state_slice[center_idx + k] as i64;
-                neg_vals[i] = state_slice[center_idx - k] as i64;
+            for i in 0..LANES {
+                let center = (2 * (out_idx + i)) + m_half;
+                pos_buf[i] = state_slice[center + k] as i32;
+                neg_buf[i] = state_slice[center - k] as i32;
             }
 
-            let sum = I64x16::from_array(pos_vals) + I64x16::from_array(neg_vals);
+            let sum = I32s::from_array(pos_buf) + I32s::from_array(neg_buf);
             acc += sum * c;
         }
 
-        // 右移缩放（不饱和）
+        // ---------------------------
+        // 右移（不饱和）
+        // ---------------------------
         let shifted = acc >> shift_vec;
 
-        // 写回 output
-        for i in 0..16 {
+        // ---------------------------
+        // 写回输出
+        // ---------------------------
+        for i in 0..LANES {
             out_chunk[i] = shifted[i] as i16;
         }
     });
 
-    // 更新 state
+    // ---------------------------
+    // 状态更新
+    // ---------------------------
     state.copy_within(n_input..required_state_len, 0);
 }
 

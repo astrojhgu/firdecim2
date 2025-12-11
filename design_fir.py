@@ -33,7 +33,8 @@ def plot_frequency_response(h):
     """
     绘制滤波器幅度响应
     """
-    w, H = freqz(h, worN=2048)
+    h1=h/np.max(h)*0.5
+    w, H = freqz(h1, worN=2048)
     plt.figure(figsize=(8,4))
     #plt.plot(w/np.pi, 20*np.log10(np.abs(H)), 'b')
     f = w / np.pi * (0.5)
@@ -55,7 +56,7 @@ if __name__ == "__main__":
     window_type = sys.argv[2]
     
     h = design_halfband_fir(num_taps, window_type)
-    
+    h=(h/np.max(h)*((1<<10)-1)).astype('<i4')
     plot_frequency_response(h)
     #plt.plot(h)
     plt.plot(h[num_taps//2:],'x')
@@ -63,6 +64,6 @@ if __name__ == "__main__":
     
     print("FIR 系数:")
     print(len(h))
-    fir_coeff_int=(h/np.max(h)*((1<<15)-1)).astype('<i4')
-    print(f"[{','.join([f'{i}' for i in fir_coeff_int])}]")
+    
+    print(f"[{','.join([f'{i}' for i in h])}]")
     
