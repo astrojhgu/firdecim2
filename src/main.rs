@@ -1,8 +1,9 @@
+#![feature(portable_simd)]
 use firdecim2::{fir::fir_coeffs, firdec_worker::resample2};
 use num::{Complex, Zero};
 use std::hint::black_box;
 
-const N_BATCH: usize = 8192;
+const N_BATCH: usize = 4096;
 fn main() {
     let fir_coeffs = fir_coeffs();
     let n_tap_half = fir_coeffs.len();
@@ -23,8 +24,8 @@ fn main() {
 
     //input[4096]=Complex::<_>::new(1, 1);
 
-    for i in 0..(640_000_000 / 8192) {
-        resample2(&input, &mut output, &fir_coeffs, &mut state, 0);
+    for i in 0..(1000_000_000 / 2048) {
+        resample2(&input, &mut output, &fir_coeffs, &mut state, 1);
         black_box(&output);
     }
 }

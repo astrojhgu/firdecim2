@@ -10,7 +10,7 @@ use crossbeam::channel::{Receiver, Sender};
 use lockfree_object_pool::{LinearObjectPool, LinearOwnedReusable};
 use num::{Complex, Num, Zero, traits::AsPrimitive};
 
-use crate::firdec_worker::resample2_complex;
+use crate::firdec_worker::resample2;
 
 pub fn start_decim_pipeline<S, T>(
     recv: Receiver<LinearOwnedReusable<Vec<Complex<S>>>>,
@@ -53,8 +53,8 @@ where
             let mut output = pool.pull_owned();
             
             let input = recv.recv().unwrap();
-            resample2_complex(
-                &input,
+            resample2(
+                &input[..],
                 &mut output[..patch_len / 2],
                 &fir_coeffs,
                 &mut state,
