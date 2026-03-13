@@ -8,7 +8,7 @@ fn main() {
     let fir_coeffs = fir_coeffs();
     let n_tap_half = fir_coeffs.len();
     let n_tap_full = n_tap_half * 2 - 1;
-    let mut state: Vec<_> = vec![0; n_tap_full - 1 + N_BATCH];
+    let mut state: Vec<_> = vec![0; n_tap_full *2 - 2 + N_BATCH];
     // let input:Vec<_>=vec![0,0,0,1,0,0].iter().map(|x| Complex::from(*x)).collect();
     // let mut output:Vec<_>=vec![0,0,0,0,0,0].iter().map(|x| Complex::from(*x)).collect();
     // let n=resample2_complex(&input, &mut output, &fir_coeffs, &mut state, 0);

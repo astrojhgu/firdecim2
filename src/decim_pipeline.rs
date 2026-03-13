@@ -1,124 +1,111 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
 };
 
 use crossbeam::channel::{Receiver, Sender};
 use lockfree_object_pool::{LinearObjectPool, LinearOwnedReusable};
-use num::{Complex, Num, Zero, traits::AsPrimitive};
+use num::{Complex, Zero};
 
 use crate::firdec_worker::resample2;
 
-pub fn start_decim_pipeline<S, T>(
-    recv: Receiver<LinearOwnedReusable<Vec<Complex<S>>>>,
-    send: Sender<LinearOwnedReusable<Vec<Complex<T>>>>,
-    fir_coeffs: &[T],
+type DTYPE = i16;
+
+pub fn start_decim_pipeline(
+    recv: Receiver<LinearOwnedReusable<Vec<Complex<DTYPE>>>>,
+    send: Sender<LinearOwnedReusable<Vec<Complex<DTYPE>>>>,
+    fir_coeffs: &[DTYPE],
     bit_shift: u32,
     patch_len: usize,
-    running: Arc<AtomicBool>,
-) -> JoinHandle<()>
-where
-    S: Copy + AsPrimitive<T> + Send + Sync,
-    T: 'static
-        + Sync
-        + Send
-        + Copy
-        + Zero
-        + Num
-        + std::ops::AddAssign
-        + std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + std::ops::Shr<u32, Output = T>,
-{
+) -> JoinHandle<()> {
     // Implementation of the decimation pipeline start logic
     let fir_coeffs = fir_coeffs.to_vec();
     std::thread::spawn(move || {
         let ntaps = fir_coeffs.len();
-        let state_len = ntaps - 1;
-        let mut state = vec![Complex::<T>::zero(); state_len];
+        let state_len = ntaps * 2  - 2 + patch_len; // 2:1 decimation, so input is 2x output
+        let mut state = vec![Complex::<DTYPE>::zero(); state_len];
+        let state_raw = unsafe {
+            std::slice::from_raw_parts_mut(state.as_mut_ptr() as *mut DTYPE, state_len * 2)
+        };
 
-        let pool: Arc<LinearObjectPool<Vec<Complex<T>>>> = Arc::new(LinearObjectPool::new(
+        let pool: Arc<LinearObjectPool<Vec<Complex<DTYPE>>>> = Arc::new(LinearObjectPool::new(
             move || {
                 //eprint!("o");
-                vec![Complex::<T>::zero(); patch_len]
+                vec![Complex::<DTYPE>::zero(); patch_len]
             },
             |_v| {},
         ));
 
         loop {
-            
             let mut output = pool.pull_owned();
-            
-            let input = recv.recv().unwrap();
-            resample2(
-                &input[..],
-                &mut output[..patch_len / 2],
-                &fir_coeffs,
-                &mut state,
-                bit_shift,
-            );
+            let output_raw = unsafe {
+                std::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut DTYPE, patch_len * 2)
+            };
+            if let Ok(input) = recv.recv() {
+                let input_raw = unsafe {
+                    std::slice::from_raw_parts(input.as_ptr() as *const DTYPE, patch_len * 2)
+                };
 
-            
-            let input = recv.recv().unwrap();
-            assert_eq!(input.len(), patch_len);
-            resample2_complex(
-                &input,
-                &mut output[patch_len / 2..],
-                &fir_coeffs,
-                &mut state,
-                bit_shift,
-            );
+                resample2(
+                    input_raw,
+                    &mut output_raw[..patch_len],
+                    &fir_coeffs,
+                    state_raw,
+                    bit_shift,
+                );
+            } else {
+                break;
+            }
 
-            
+            if let Ok(input) = recv.recv() {
+                let input_raw = unsafe {
+                    std::slice::from_raw_parts(input.as_ptr() as *const DTYPE, patch_len * 2)
+                };
+                assert_eq!(input.len(), patch_len);
+                resample2(
+                    input_raw,
+                    &mut output_raw[patch_len..],
+                    &fir_coeffs,
+                    state_raw,
+                    bit_shift,
+                );
+            }else{
+                break;
+            }
             send.send(output).unwrap();
         }
     })
 }
 
-pub fn start_decim_pipeline_chain<S, T>(
-    recv: Receiver<LinearOwnedReusable<Vec<Complex<S>>>>,
-    fir_coeffs: &[T],
+pub fn start_decim_pipeline_chain(
+    recv: Receiver<LinearOwnedReusable<Vec<Complex<DTYPE>>>>,
+    fir_coeffs: &[DTYPE],
     bit_shifts: &[u32],
     patch_len: usize,
-    running: Arc<AtomicBool>,
 ) -> (
     Vec<JoinHandle<()>>,
-    Receiver<LinearOwnedReusable<Vec<Complex<T>>>>,
+    Receiver<LinearOwnedReusable<Vec<Complex<DTYPE>>>>,
 )
-where
-    S: Copy + AsPrimitive<T> + Send + Sync,
-    T: 'static
-        + AsPrimitive<T>
-        + Sync
-        + Send
-        + Copy
-        + Zero
-        + Num
-        + std::ops::AddAssign
-        + std::ops::Mul<Output = T>
-        + std::ops::Add<Output = T>
-        + std::ops::Shr<u32, Output = T>,
 {
     let n_cascades = bit_shifts.len();
     let mut result = Vec::with_capacity(n_cascades);
     let (send1, mut recv1) = crossbeam::channel::bounded::<
-        lockfree_object_pool::LinearOwnedReusable<Vec<Complex<T>>>,
+        lockfree_object_pool::LinearOwnedReusable<Vec<Complex<DTYPE>>>,
     >(4);
+
     result.push(start_decim_pipeline(
         recv,
         send1,
         fir_coeffs,
         bit_shifts[0],
         patch_len,
-        running.clone(),
     ));
 
     for i in 1..n_cascades {
         let (send1, recv2) = crossbeam::channel::bounded::<
-            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<T>>>,
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<DTYPE>>>,
         >(4);
         let recv = std::mem::replace(&mut recv1, recv2);
         result.push(start_decim_pipeline(
@@ -127,7 +114,6 @@ where
             fir_coeffs,
             bit_shifts[i],
             patch_len,
-            running.clone(),
         ));
     }
     (result, recv1)
@@ -137,7 +123,7 @@ where
 mod tests {
     extern crate test;
     use super::start_decim_pipeline;
-    use crate::fir::fir_coeffs;
+    use crate::{decim_pipeline::DTYPE, fir::fir_coeffs};
     use lockfree_object_pool::LinearObjectPool;
     use num::{
         Complex,
@@ -150,17 +136,17 @@ mod tests {
     #[test]
     fn test_decim_pipeline() {
         let fir_coeffs = fir_coeffs();
-        let patch_len = 8192;
+        let patch_len = 2048;
         let pool = Arc::new(LinearObjectPool::new(
-            move || vec![Complex::<i8>::zero(); patch_len],
+            move || vec![Complex::<i16>::zero(); patch_len],
             |_v| {},
         ));
 
         let (send_input, recv_input) = crossbeam::channel::bounded::<
-            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i8>>>,
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i16>>>,
         >(4);
         let (send_output, recv_output) = crossbeam::channel::bounded::<
-            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i32>>>,
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i16>>>,
         >(4);
         let running = Arc::new(AtomicBool::new(true));
 
@@ -169,8 +155,7 @@ mod tests {
             send_output,
             &fir_coeffs,
             0,
-            patch_len,
-            running.clone(),
+            patch_len
         );
 
         for i in 0..10 {
@@ -189,7 +174,7 @@ mod tests {
         let patch_len = 8192;
 
         let (send_input, recv_input) = crossbeam::channel::bounded::<
-            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i8>>>,
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<DTYPE>>>,
         >(4);
         let nstages = 3;
         let bit_shifts = vec![0; nstages];
@@ -200,12 +185,11 @@ mod tests {
             recv_input,
             &fir_coeffs,
             &bit_shifts,
-            patch_len,
-            running.clone(),
+            patch_len
         );
 
         let pool = Arc::new(LinearObjectPool::new(
-            move || vec![Complex::<i8>::zero(); patch_len],
+            move || vec![Complex::<DTYPE>::zero(); patch_len],
             |_v| {},
         ));
 
@@ -222,10 +206,10 @@ mod tests {
     #[bench]
     fn bench_decim_pipeline_chain(b: &mut Bencher) {
         let fir_coeffs = fir_coeffs();
-        let patch_len = 8192;
+        let patch_len = 2048;
 
         let (send_input, recv_input) = crossbeam::channel::bounded::<
-            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i8>>>,
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<DTYPE>>>,
         >(4);
         let nstages = 3;
         let bit_shifts = vec![0; nstages];
@@ -237,11 +221,10 @@ mod tests {
             &fir_coeffs,
             &bit_shifts,
             patch_len,
-            running.clone(),
         );
 
         let pool = Arc::new(LinearObjectPool::new(
-            move || vec![Complex::<i8>::zero(); patch_len],
+            move || vec![Complex::<DTYPE>::zero(); patch_len],
             |_v| {},
         ));
 
