@@ -1,54 +1,65 @@
 use std::simd::{Simd, num::SimdInt, simd_swizzle};
 
-pub const LANES: usize = 16;
+use crate::{LANES, I32s};
 
+
+#[inline(always)]
 pub fn resample2(
     input: &[i16],
     output: &mut [i16],
-    coeff: &[i16],
+    coeffs_i32: &[I32s],
     state: &mut [i16],
     bit_shift: u32,
 ) {
-    let n_half_taps = coeff.len();
+    let n_half_taps = coeffs_i32.len();
     let m_half = n_half_taps - 1;
     let n_input = input.len();
     let n_output = output.len();
     let n_old_state = m_half * 4;
-    assert_eq!(state.len(), n_old_state + n_input, "状态空间长度必须为 n_old_state + n_input");
 
     state[n_old_state..n_old_state + n_input].copy_from_slice(input);
 
-    type I32s = Simd<i32, LANES>;
-
-    // --- 核心优化：预处理位移 ---
-    // 我们不再在循环里执行 acc >> bit_shift
-    // 如果 bit_shift 较小，或者我们能接受在累加前处理系数
-    // 注意：这里为了保持精度，我们依然使用 i32 累加，但减少一次向量位移指令
-    let coeffs_i32: Vec<I32s> = coeff.iter()
-        .map(|&c| I32s::splat(c as i32))
-        .collect();
+    let shift_vec = I32s::splat(bit_shift as i32);
 
     for j in 0..(n_output / LANES) {
         let out_idx = j * LANES;
         let state_offset = 2 * out_idx + (m_half * 2);
 
-        // 使用之前优化过的加载函数
-        let mut acc = extract_even_iq(&state[state_offset..]) * coeffs_i32[0];
+        // --- 中心 Tap ---
+        let mut acc0 = extract_even_iq(&state[state_offset..]) * coeffs_i32[0];
+        let mut acc1 = I32s::splat(0); // 第二个累加器，打破流水线依赖
 
+        // --- 展开循环 (每步处理 2 个 tap，即 4 个对称点) ---
         let mut k = 1;
+        while k + 2 <= m_half {
+            // 第一组
+            let c_a = coeffs_i32[k];
+            let p_a = extract_even_iq(&state[state_offset + k * 2..]);
+            let n_a = extract_even_iq(&state[state_offset - k * 2..]);
+            acc0 += (p_a + n_a) * c_a;
+
+            // 第二组
+            let c_b = coeffs_i32[k + 2];
+            let p_b = extract_even_iq(&state[state_offset + (k + 2) * 2..]);
+            let n_b = extract_even_iq(&state[state_offset - (k + 2) * 2..]);
+            acc1 += (p_b + n_b) * c_b;
+
+            k += 4; // 步进 4
+        }
+
+        // 处理剩余的 k (如果有)
         while k <= m_half {
             let c = coeffs_i32[k];
             let p = extract_even_iq(&state[state_offset + k * 2..]);
             let n = extract_even_iq(&state[state_offset - k * 2..]);
-            
-            // FMA (Fused Multiply-Add) 风格：编译器会尝试将其优化为单周期指令
-            acc += (p + n) * c;
+            acc0 += (p + n) * c;
             k += 2;
         }
 
-        // --- 仅在此处执行一次位移 ---
-        let shifted = acc >> I32s::splat(bit_shift as i32);
-        
+        // 合并累加器
+        let acc = acc0 + acc1;
+
+        let shifted = acc >> shift_vec;
         let out_simd: Simd<i16, LANES> = shifted.cast::<i16>();
         output[out_idx..out_idx + LANES].copy_from_slice(out_simd.as_array());
     }
@@ -56,28 +67,23 @@ pub fn resample2(
     state.copy_within(n_input..n_input + n_old_state, 0);
 }
 
+// 保持这个高效的 swizzle 不变，但确保它内联
 #[inline(always)]
 fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
-    // 这里的关键是：编译器能否优化这 2 个 128-bit load 为 1 个 256-bit load
-    // 直接 load 32 字节
+    // 强制使用对齐加载（如果可能）或者直接 from_slice
     let s = Simd::<i16, 32>::from_slice(&src[0..32]);
-
-    // 这是一个非常快的 Shuffle 模式，直接选取 I0,Q0, I2,Q2...
-    // 使用 swizzle 提取偶数复数对
     let picked = simd_swizzle!(
         s,
         [0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21, 24, 25, 28, 29]
     );
-
     picked.cast::<i32>()
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::resample2;
     //use crate::fir;
-    use crate::fir::fir_coeffs;
+    use crate::{fir::fir_coeffs, I32s, LANES};
     //use num::Complex;
     //use num::traits::FloatConst;
     //use num::traits::Zero;
@@ -116,7 +122,11 @@ mod tests {
         let mut output = vec![0i16; N_BATCH / 2];
 
         // 调用优化后的函数
-        resample2(&input, &mut output, &fir_coeffs, &mut state, 0);
+        let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
+        .map(|&c| I32s::splat(c as i32))
+        .collect();
+
+        resample2(&input, &mut output, &fir_coeffs_i32, &mut state, 0);
 
         // --- 验证逻辑 ---
         // 对于单位脉冲 [1, 1, 0, 0, ...]，输出应该是滤波器的系数
@@ -148,6 +158,10 @@ mod tests {
 
         // 1. 准备参数
         let coeff = fir_coeffs();
+        let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=coeff.iter()
+        .map(|&c| I32s::splat(c as i32))
+        .collect();
+
         let n_half_taps = coeff.len();
         let m_half = n_half_taps - 1;
         let n_old_state = 2 * m_half;
@@ -160,7 +174,7 @@ mod tests {
         // --- 实验组 A: 一次性处理 ---
         let mut state_a = vec![0i16; n_old_state * 2 + total_input_len];
         let mut output_a = vec![0i16; total_input_len / 2];
-        resample2(&input, &mut output_a, &coeff, &mut state_a, bit_shift);
+        resample2(&input, &mut output_a, &fir_coeffs_i32, &mut state_a, bit_shift);
         println!("output a: {:?}", output_a);
 
         // --- 实验组 B: 分两段处理 ---
@@ -175,7 +189,7 @@ mod tests {
         resample2(
             &input[..mid_input],
             &mut output_b[..mid_output],
-            &coeff,
+            &fir_coeffs_i32,
             &mut state_b,
             bit_shift,
         );
@@ -184,7 +198,7 @@ mod tests {
         resample2(
             &input[mid_input..],
             &mut output_b[mid_output..],
-            &coeff,
+            &fir_coeffs_i32,
             &mut state_b,
             bit_shift,
         );

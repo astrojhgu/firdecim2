@@ -1,11 +1,14 @@
 #![feature(portable_simd)]
-use firdecim2::{fir::fir_coeffs, firdec_worker::resample2};
+use firdecim2::{fir::fir_coeffs, firdec_worker::resample2, I32s};
 use num::{Complex, Zero};
 use std::hint::black_box;
 
 const N_BATCH: usize = 4096;
 fn main() {
     let fir_coeffs = fir_coeffs();
+    let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
+        .map(|&c| I32s::splat(c as i32))
+        .collect();
     let n_tap_half = fir_coeffs.len();
     let n_tap_full = n_tap_half * 2 - 1;
     let mut state: Vec<_> = vec![0; n_tap_full *2 - 2 + N_BATCH];
@@ -25,7 +28,7 @@ fn main() {
     //input[4096]=Complex::<_>::new(1, 1);
 
     for i in 0..(1000_000_000 / 2048) {
-        resample2(&input, &mut output, &fir_coeffs, &mut state, 1);
+        resample2(&input, &mut output, &fir_coeffs_i32, &mut state, 1);
         black_box(&output);
     }
 }

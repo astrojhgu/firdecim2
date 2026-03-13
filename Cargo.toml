@@ -8,8 +8,11 @@ num="0.4.3"
 crossbeam="0.8.4"
 lockfree-object-pool = "0.1.6"
 rayon="1.11.0"
+core_affinity="0.8.3"
+libc="^0.2"
 
 [profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
+opt-level = 3        # 最高等级优化
+lto = "fat"          # 开启全模块链接优化，极大加速跨跨线程/跨 crate 调用
+codegen-units = 1    # 限制并行编译单元，允许编译器进行更彻底的全局优化
+panic = "abort"      # 移除异常回溯逻辑，减少代码体积和分支压力

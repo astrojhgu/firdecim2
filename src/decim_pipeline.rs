@@ -9,7 +9,18 @@ use crossbeam::channel::{Receiver, Sender};
 use lockfree_object_pool::{LinearObjectPool, LinearOwnedReusable};
 use num::{Complex, Zero};
 
-use crate::firdec_worker::resample2;
+use crate::{firdec_worker::resample2, I32s};
+
+use core_affinity;
+
+fn pin_current_thread() {
+    let cpu = unsafe { libc::sched_getcpu() };
+
+    let cores = core_affinity::get_core_ids().unwrap();
+    let core = cores.into_iter().find(|c| c.id == cpu as usize).unwrap();
+
+    core_affinity::set_for_current(core);
+}
 
 type DTYPE = i16;
 
@@ -22,7 +33,12 @@ pub fn start_decim_pipeline(
 ) -> JoinHandle<()> {
     // Implementation of the decimation pipeline start logic
     let fir_coeffs = fir_coeffs.to_vec();
+    let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
+        .map(|&c| I32s::splat(c as i32))
+        .collect();
+
     std::thread::spawn(move || {
+        pin_current_thread();
         let ntaps = fir_coeffs.len();
         let state_len = ntaps * 2  - 2 + patch_len; // 2:1 decimation, so input is 2x output
         let mut state = vec![Complex::<DTYPE>::zero(); state_len];
@@ -51,7 +67,7 @@ pub fn start_decim_pipeline(
                 resample2(
                     input_raw,
                     &mut output_raw[..patch_len],
-                    &fir_coeffs,
+                    &fir_coeffs_i32,
                     state_raw,
                     bit_shift,
                 );
@@ -67,14 +83,17 @@ pub fn start_decim_pipeline(
                 resample2(
                     input_raw,
                     &mut output_raw[patch_len..],
-                    &fir_coeffs,
+                    &fir_coeffs_i32,
                     state_raw,
                     bit_shift,
                 );
             }else{
                 break;
             }
-            send.send(output).unwrap();
+
+            if send.send(output).is_err(){
+                break;
+            }
         }
     })
 }
