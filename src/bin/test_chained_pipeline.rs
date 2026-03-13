@@ -19,10 +19,10 @@ fn main() {
         |_v| {},
     ));
 
-    let nstages = 4;
+    let nstages = 3;
     let bit_shifts = vec![0; nstages];
     let (send_input, recv_input) =
-        bounded::<lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i16>>>>(4);
+        bounded::<lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i16>>>>(64);
     let (_handles, recv_output) = start_decim_pipeline_chain(
         recv_input,
         &fir_coeffs,
@@ -38,7 +38,7 @@ fn main() {
         }
     });
 
-    for i in 0..(1000_000_000 / 2048) {
+    for i in 0..(1000_000_000 / patch_len) {
         //for i in 0..800 {
         let mut input = pool.pull_owned();
         send_input.send(input).unwrap();

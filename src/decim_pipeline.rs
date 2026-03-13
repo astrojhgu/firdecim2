@@ -93,7 +93,7 @@ pub fn start_decim_pipeline_chain(
     let mut result = Vec::with_capacity(n_cascades);
     let (send1, mut recv1) = crossbeam::channel::bounded::<
         lockfree_object_pool::LinearOwnedReusable<Vec<Complex<DTYPE>>>,
-    >(4);
+    >(32);
 
     result.push(start_decim_pipeline(
         recv,

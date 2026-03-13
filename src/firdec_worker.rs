@@ -14,6 +14,7 @@ pub fn resample2(
     let n_input = input.len();
     let n_output = output.len();
     let n_old_state = m_half * 4;
+    assert_eq!(state.len(), n_old_state + n_input, "状态空间长度必须为 n_old_state + n_input");
 
     state[n_old_state..n_old_state + n_input].copy_from_slice(input);
 
@@ -54,22 +55,6 @@ pub fn resample2(
 
     state.copy_within(n_input..n_input + n_old_state, 0);
 }
-/// 优化后的加载并求和函数
-#[inline(always)]
-fn load_sum_pos_neg(
-    state: &[i16],
-    offset: usize,
-    k2: usize,
-    coeff: &Simd<i32, LANES>,
-) -> Simd<i32, LANES> {
-    // 提取 pos 方向的 IQ 对
-    let p = extract_even_iq(&state[offset + k2..]);
-    // 提取 neg 方向的 IQ 对
-    let n = extract_even_iq(&state[offset - k2..]);
-
-    // 在 i32 层面求和并乘系数
-    (p + n) * *coeff
-}
 
 #[inline(always)]
 fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
@@ -87,10 +72,6 @@ fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
     picked.cast::<i32>()
 }
 
-#[inline(always)]
-fn load_complex_deinterleaved_i32(src: &[i16], coeff: &Simd<i32, LANES>) -> Simd<i32, LANES> {
-    extract_even_iq(src) * *coeff
-}
 
 #[cfg(test)]
 mod tests {
