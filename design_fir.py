@@ -26,7 +26,8 @@ def design_halfband_fir(num_taps, window_type='hamming'):
         raise ValueError("半带滤波器 tap 数必须为奇数")
     
     # 半带滤波器截止频率 fc = 0.25 * fs
-    h = firwin(num_taps, cutoff=0.25*fs, window=window_type, fs=fs)
+    h = firwin(num_taps, cutoff=0.2, window=window_type, fs=fs)
+    print(h)
     return h
 
 def plot_frequency_response(h):

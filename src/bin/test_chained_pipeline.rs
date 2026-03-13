@@ -19,7 +19,7 @@ fn main() {
         |_v| {},
     ));
 
-    let nstages = 3;
+    let nstages = 6;
     let bit_shifts = vec![0; nstages];
     let (send_input, recv_input) =
         bounded::<lockfree_object_pool::LinearOwnedReusable<Vec<Complex<i16>>>>(64);
