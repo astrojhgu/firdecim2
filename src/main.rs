@@ -28,7 +28,7 @@ fn main() {
     //input[4096]=Complex::<_>::new(1, 1);
 
     for i in 0..(1000_000_000 / 2048) {
-        resample2(&input, &mut output, &fir_coeffs_i32, &mut state, 1);
+        resample2(&input, &mut output, &fir_coeffs, &mut state, 1);
         black_box(&output);
     }
 }

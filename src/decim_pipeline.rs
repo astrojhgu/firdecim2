@@ -67,7 +67,7 @@ pub fn start_decim_pipeline(
                 resample2(
                     input_raw,
                     &mut output_raw[..patch_len],
-                    &fir_coeffs_i32,
+                    &fir_coeffs,
                     state_raw,
                     bit_shift,
                 );
@@ -83,7 +83,7 @@ pub fn start_decim_pipeline(
                 resample2(
                     input_raw,
                     &mut output_raw[patch_len..],
-                    &fir_coeffs_i32,
+                    &fir_coeffs,
                     state_raw,
                     bit_shift,
                 );

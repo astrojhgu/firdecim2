@@ -1,16 +1,78 @@
+use crate::{I32s, LANES};
+use num::Complex;
 use std::simd::{Simd, num::SimdInt, simd_swizzle};
 
-use crate::{LANES, I32s};
+pub fn resample2_plain(
+    input: &[i16],
+    output: &mut [i16],
+    coeffs: &[i16], // 假设这里传入的是半个周期的系数（包含中心点）
+    state: &mut [i16],
+    bit_shift: u32,
+) {
+    pub const LANES: usize = 16;
 
+    // 1. 准备完整系数
+    // 半带滤波器特性：除了中心点，偶数项为 0。
+    // 假设 coeffs 传入的是对称的一半，例如 [c0, 0, c2, 0, c_center]
+    let fir_coeffs_full: Vec<i32> = coeffs
+        .iter()
+        .skip(1) // 跳过中心点，避免重复
+        .rev()
+        .chain(coeffs.iter())
+        .map(|&x| x as i32)
+        .collect();
+    //println!("coeff: {:?}", fir_coeffs_full);
+    let n_full_taps = fir_coeffs_full.len();
+    let n_input = input.len()/2;//in complex samples
+    let n_old_state = n_full_taps - 1;
+
+    // --- 断言校验 ---
+    assert!(
+        state.len()/2 >= n_old_state + n_input,//in complex samples
+        "状态空间不足以容纳历史数据和当前输入"
+    );
+    let n_output = n_input / 2;
+    assert_eq!(output.len()/2, n_output, "输出长度必须是输入长度的一半");// in complex samples
+    assert_eq!(n_input % 2, 0, "输入长度必须是2的倍数以进行下采样");
+
+    // 2. 将输入加载到 state 缓冲区（紧随历史数据之后）
+    state[n_old_state*2..n_old_state*2 + n_input*2].copy_from_slice(input);
+
+    // 3. 滤波与下采样
+    // 这里的 i 是输入索引，由于是 1/2 下采样，我们每次跳 2 个样本
+    for i in 0..n_output {
+        let mut acc_re = 0i32;
+        let mut acc_im = 0i32;
+
+        // 滑动窗口起始点
+        let window: &[i16] = &state[i * 4..i * 4 + n_full_taps*2]; // 每个复数占 2 个 i16
+
+        for (sample, &coeff) in window.chunks(2).zip(fir_coeffs_full.iter()) {
+            acc_re += (sample[0] as i32) * (coeff as i32);
+            acc_im += (sample[1] as i32) * (coeff as i32);
+        }
+
+        // 缩放并转回 i16
+        //output[i] = Complex::new((acc_re >> bit_shift) as i16, (acc_im >> bit_shift) as i16);
+        output[i*2] = (acc_re >> bit_shift) as i16; // I
+        output[i*2 + 1] = (acc_im >> bit_shift) as i16; // Q
+    }
+
+    // 4. 更新状态：将本次输入的末尾部分移至 state 开头，供下次迭代使用
+    state.copy_within(n_input*2..n_input*2 + n_old_state*2, 0);
+}
 
 #[inline(always)]
 pub fn resample2(
     input: &[i16],
     output: &mut [i16],
-    coeffs_i32: &[I32s],
+    coeffs: &[i16],
     state: &mut [i16],
     bit_shift: u32,
 ) {
+    let coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
+        coeffs.iter().map(|&c| I32s::splat(c as i32)).collect();
+
     let n_half_taps = coeffs_i32.len();
     let m_half = n_half_taps - 1;
     let n_input = input.len();
@@ -81,9 +143,11 @@ fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
 
 #[cfg(test)]
 mod tests {
-    use super::resample2;
+    use num::{Complex, Zero};
+
+    use super::{resample2, resample2_plain};
     //use crate::fir;
-    use crate::{fir::fir_coeffs, I32s, LANES};
+    use crate::{I32s, LANES, fir::fir_coeffs};
     //use num::Complex;
     //use num::traits::FloatConst;
     //use num::traits::Zero;
@@ -91,17 +155,19 @@ mod tests {
     //use std::io::Write;
     const N_BATCH: usize = 512;
 
+    
+
     #[test]
     fn unit_pulse_complex() {
         let fir_coeffs = fir_coeffs(); // 假设这是半带滤波器的前一半系数（含中心点）
 
         // 生成完整的滤波器系数用于比对
         // 注意：半带滤波器的偶数项（除了中心点）通常为 0
-        let fir_coeffs_full: Vec<i16> = fir_coeffs
+        let fir_coeffs_full: Vec<i32> = fir_coeffs
             .iter()
             .rev()
             .chain(fir_coeffs.iter().skip(1))
-            .cloned()
+            .map(|&x| x as i32)
             .collect();
 
         let n_tap_half = fir_coeffs.len();
@@ -122,11 +188,10 @@ mod tests {
         let mut output = vec![0i16; N_BATCH / 2];
 
         // 调用优化后的函数
-        let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
-        .map(|&c| I32s::splat(c as i32))
-        .collect();
+        let fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
+            fir_coeffs.iter().map(|&c| I32s::splat(c as i32)).collect();
 
-        resample2(&input, &mut output, &fir_coeffs_i32, &mut state, 0);
+        resample2_plain(&input, &mut output, &fir_coeffs, &mut state, 0);
 
         // --- 验证逻辑 ---
         // 对于单位脉冲 [1, 1, 0, 0, ...]，输出应该是滤波器的系数
@@ -147,20 +212,20 @@ mod tests {
                     idx, expected_val, out_re, out_im
                 );
 
-                assert_eq!(out_re, expected_val, "实部不匹配 @ index {}", idx);
-                assert_eq!(out_im, expected_val, "虚部不匹配 @ index {}", idx);
+                assert_eq!(out_re, expected_val as i16, "实部不匹配 @ index {}", idx);
+                assert_eq!(out_im, expected_val as i16, "虚部不匹配 @ index {}", idx);
             });
     }
 
+    
     #[test]
     fn test_segmented_consistency() {
         use crate::fir::fir_coeffs; // 假设你的系数生成函数在此
 
         // 1. 准备参数
         let coeff = fir_coeffs();
-        let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=coeff.iter()
-        .map(|&c| I32s::splat(c as i32))
-        .collect();
+        let fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
+            coeff.iter().map(|&c| I32s::splat(c as i32)).collect();
 
         let n_half_taps = coeff.len();
         let m_half = n_half_taps - 1;
@@ -174,7 +239,7 @@ mod tests {
         // --- 实验组 A: 一次性处理 ---
         let mut state_a = vec![0i16; n_old_state * 2 + total_input_len];
         let mut output_a = vec![0i16; total_input_len / 2];
-        resample2(&input, &mut output_a, &fir_coeffs_i32, &mut state_a, bit_shift);
+        resample2_plain(&input, &mut output_a, &coeff, &mut state_a, bit_shift);
         println!("output a: {:?}", output_a);
 
         // --- 实验组 B: 分两段处理 ---
@@ -186,19 +251,19 @@ mod tests {
 
         // 第一段：处理前一半
         // 注意：state 的长度在 resample2 中有断言检查，传入的 state 切片长度必须符合约定
-        resample2(
+        resample2_plain(
             &input[..mid_input],
             &mut output_b[..mid_output],
-            &fir_coeffs_i32,
+            &coeff,
             &mut state_b,
             bit_shift,
         );
 
         // 第二段：处理后一半 (此时 state_b 内部已经自动完成了 copy_within)
-        resample2(
+        resample2_plain(
             &input[mid_input..],
             &mut output_b[mid_output..],
-            &fir_coeffs_i32,
+            &coeff,
             &mut state_b,
             bit_shift,
         );
