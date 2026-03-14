@@ -1,5 +1,4 @@
 use crate::{I32s, LANES};
-use num::Complex;
 use std::simd::{Simd, num::SimdInt, simd_swizzle};
 
 pub fn resample2_plain(
@@ -9,8 +8,6 @@ pub fn resample2_plain(
     state: &mut [i16],
     bit_shift: u32,
 ) {
-    pub const LANES: usize = 16;
-
     // 1. 准备完整系数
     // 半带滤波器特性：除了中心点，偶数项为 0。
     // 假设 coeffs 传入的是对称的一半，例如 [c0, 0, c2, 0, c_center]

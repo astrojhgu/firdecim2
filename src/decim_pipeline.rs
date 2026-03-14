@@ -33,7 +33,7 @@ pub fn start_decim_pipeline(
 ) -> JoinHandle<()> {
     // Implementation of the decimation pipeline start logic
     let fir_coeffs = fir_coeffs.to_vec();
-    let fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
+    let _fir_coeffs_i32:Vec<std::simd::Simd<i32, 16>>=fir_coeffs.iter()
         .map(|&c| I32s::splat(c as i32))
         .collect();
 

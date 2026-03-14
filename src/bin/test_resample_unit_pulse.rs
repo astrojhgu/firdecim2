@@ -7,7 +7,7 @@ const N_BATCH: usize = 512;
 pub fn main() {
     let fir_coeffs = fir_coeffs();
     // 调用优化后的函数
-    let fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
+    let _fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
         fir_coeffs.iter().map(|&c| I32s::splat(c as i32)).collect();
 
     let n_tap_half = fir_coeffs.len();

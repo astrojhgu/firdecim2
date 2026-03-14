@@ -7,13 +7,13 @@ const N_BATCH: usize = 2048;
 pub fn main() {
     let fir_coeffs = fir_coeffs();
     // 调用优化后的函数
-    let fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
+    let _fir_coeffs_i32: Vec<std::simd::Simd<i32, 16>> =
         fir_coeffs.iter().map(|&c| I32s::splat(c as i32)).collect();
 
     let n_tap_half = fir_coeffs.len();
     let m_half = n_tap_half - 1;
 
-    let mut omega = 0.1;
+    let omega = 0.1;
 
     // 状态空间：(ntaps - 1) * 2 是历史复数点占用的 i16 数量
     let n_old_state = m_half * 2 * 2;
