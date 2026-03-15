@@ -9,7 +9,7 @@ use crossbeam::channel::{Receiver, Sender};
 use lockfree_object_pool::{LinearObjectPool, LinearOwnedReusable};
 use num::{Complex, Zero};
 
-use crate::{firdec_worker::resample2, I32s};
+use crate::{firdec_worker::{resample2, resample2_f32}, I32s, F32s, LANES8, LANES16};
 
 use core_affinity;
 
@@ -132,6 +132,114 @@ pub fn start_decim_pipeline_chain(
             send1,
             fir_coeffs,
             bit_shifts[i],
+            patch_len,
+        ));
+    }
+    (result, recv1)
+}
+
+pub fn start_decim_pipeline_f32(
+    recv: Receiver<LinearOwnedReusable<Vec<Complex<f32>>>>,
+    send: Sender<LinearOwnedReusable<Vec<Complex<f32>>>>,
+    fir_coeffs: &[f32],
+    patch_len: usize,
+) -> JoinHandle<()> {
+    // Implementation of the decimation pipeline start logic
+    let fir_coeffs = fir_coeffs.to_vec();
+    let _fir_coeffs_f32:Vec<std::simd::Simd<f32, 8>>=fir_coeffs.iter()
+        .map(|&c| F32s::splat(c))
+        .collect();
+
+    std::thread::spawn(move || {
+        pin_current_thread();
+        let ntaps = fir_coeffs.len();
+        let state_len = ntaps * 2  - 2 + patch_len; // 2:1 decimation, so input is 2x output
+        let mut state = vec![Complex::<DTYPE>::zero(); state_len];
+        let state_raw = unsafe {
+            std::slice::from_raw_parts_mut(state.as_mut_ptr() as *mut f32, state_len * 2)
+        };
+
+        let pool: Arc<LinearObjectPool<Vec<Complex<f32>>>> = Arc::new(LinearObjectPool::new(
+            move || {
+                //eprint!("o");
+                vec![Complex::<f32>::zero(); patch_len]
+            },
+            |_v| {},
+        ));
+
+        loop {
+            let mut output = pool.pull_owned();
+            let output_raw = unsafe {
+                std::slice::from_raw_parts_mut(output.as_mut_ptr() as *mut f32, patch_len * 2)
+            };
+            if let Ok(input) = recv.recv() {
+                let input_raw = unsafe {
+                    std::slice::from_raw_parts(input.as_ptr() as *const f32, patch_len * 2)
+                };
+
+                resample2_f32(
+                    input_raw,
+                    &mut output_raw[..patch_len],
+                    &fir_coeffs,
+                    state_raw
+                );
+            } else {
+                break;
+            }
+
+            if let Ok(input) = recv.recv() {
+                let input_raw = unsafe {
+                    std::slice::from_raw_parts(input.as_ptr() as *const f32, patch_len * 2)
+                };
+                assert_eq!(input.len(), patch_len);
+                resample2_f32(
+                    input_raw,
+                    &mut output_raw[patch_len..],
+                    &fir_coeffs,
+                    state_raw
+                );
+            }else{
+                break;
+            }
+
+            if send.send(output).is_err(){
+                break;
+            }
+        }
+    })
+}
+
+pub fn start_decim_pipeline_chain_f32(
+    recv: Receiver<LinearOwnedReusable<Vec<Complex<f32>>>>,
+    fir_coeffs: &[f32],
+    n_cascades: usize, 
+    patch_len: usize,
+) -> (
+    Vec<JoinHandle<()>>,
+    Receiver<LinearOwnedReusable<Vec<Complex<f32>>>>,
+)
+{
+    let mut result = Vec::with_capacity(n_cascades);
+    let (send1, mut recv1) = crossbeam::channel::bounded::<
+        lockfree_object_pool::LinearOwnedReusable<Vec<Complex<f32>>>,
+    >(32);
+
+    result.push(start_decim_pipeline_f32(
+        recv,
+        send1,
+        fir_coeffs,
+        patch_len,
+    ));
+
+    for i in 1..n_cascades {
+        let (send1, recv2) = crossbeam::channel::bounded::<
+            lockfree_object_pool::LinearOwnedReusable<Vec<Complex<f32>>>,
+        >(4);
+        let recv = std::mem::replace(&mut recv1, recv2);
+        result.push(start_decim_pipeline_f32(
+            recv,
+            send1,
+            fir_coeffs,
             patch_len,
         ));
     }

@@ -1,5 +1,8 @@
-use crate::{I32s, LANES};
-use std::simd::{Simd, num::SimdInt, simd_swizzle};
+use crate::{I32s, F32s, LANES8, LANES16};
+use std::simd::{Simd, StdFloat, f32x8, num::{SimdFloat, SimdInt}, simd_swizzle};
+
+
+
 
 pub fn resample2_plain(
     input: &[i16],
@@ -80,8 +83,8 @@ pub fn resample2(
 
     let shift_vec = I32s::splat(bit_shift as i32);
 
-    for j in 0..(n_output / LANES) {
-        let out_idx = j * LANES;
+    for j in 0..(n_output / LANES16) {
+        let out_idx = j * LANES16;
         let state_offset = 2 * out_idx + (m_half * 2);
 
         // --- 中心 Tap ---
@@ -119,8 +122,8 @@ pub fn resample2(
         let acc = acc0 + acc1;
 
         let shifted = acc >> shift_vec;
-        let out_simd: Simd<i16, LANES> = shifted.cast::<i16>();
-        output[out_idx..out_idx + LANES].copy_from_slice(out_simd.as_array());
+        let out_simd: Simd<i16, LANES16> = shifted.cast::<i16>();
+        output[out_idx..out_idx + LANES16].copy_from_slice(out_simd.as_array());
     }
 
     state.copy_within(n_input..n_input + n_old_state, 0);
@@ -128,7 +131,7 @@ pub fn resample2(
 
 // 保持这个高效的 swizzle 不变，但确保它内联
 #[inline(always)]
-fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
+fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES16> {
     // 强制使用对齐加载（如果可能）或者直接 from_slice
     let s = Simd::<i16, 32>::from_slice(&src[0..32]);
     let picked = simd_swizzle!(
@@ -138,13 +141,87 @@ fn extract_even_iq(src: &[i16]) -> Simd<i32, LANES> {
     picked.cast::<i32>()
 }
 
+
+
+#[inline(always)]
+pub fn resample2_f32(
+    input: &[f32],
+    output: &mut [f32],
+    coeffs: &[f32],
+    state: &mut [f32],
+) {
+    let n_half_taps = coeffs.len();
+    let m_half = n_half_taps - 1;
+    let n_input = input.len();
+    let n_output = output.len();
+    let n_old_state = m_half * 4;
+
+    // 1. 状态更新
+    state[n_old_state..n_old_state + n_input].copy_from_slice(input);
+
+    // 2. 核心优化：在循环外预转换系数，避免在 loop 内部重复执行 splat
+    // 这样即便函数签名是 &[f32]，内部执行效率依然极高
+    let coeffs_simd: Vec<F32s> = coeffs
+        .iter()
+        .map(|&c| F32s::splat(c))
+        .collect();
+
+    for j in 0..(n_output / LANES8) {
+        let out_idx = j * LANES8;
+        let state_offset = 2 * out_idx + (m_half * 2);
+
+        // --- 中心 Tap ---
+        let mut acc0 = extract_even_iq_f32(&state[state_offset..]) * coeffs_simd[0];
+        let mut acc1 = F32s::splat(0.0);
+
+        // --- 循环展开 (利用 FMA: mul_add) ---
+        let mut k = 1;
+        while k + 2 <= m_half {
+            let c_a = coeffs_simd[k];
+            let p_a = extract_even_iq_f32(&state[state_offset + k * 2..]);
+            let n_a = extract_even_iq_f32(&state[state_offset - k * 2..]);
+            acc0 = (p_a + n_a).mul_add(c_a, acc0);
+
+            let c_b = coeffs_simd[k + 2];
+            let p_b = extract_even_iq_f32(&state[state_offset + (k + 2) * 2..]);
+            let n_b = extract_even_iq_f32(&state[state_offset - (k + 2) * 2..]);
+            acc1 = (p_b + n_b).mul_add(c_b, acc1);
+
+            k += 4;
+        }
+
+        while k <= m_half {
+            let c = coeffs_simd[k];
+            let p = extract_even_iq_f32(&state[state_offset + k * 2..]);
+            let n = extract_even_iq_f32(&state[state_offset - k * 2..]);
+            acc0 = (p + n).mul_add(c, acc0);
+            k += 2;
+        }
+
+        let acc = acc0 + acc1;
+        output[out_idx..out_idx + LANES8].copy_from_slice(acc.as_array());
+    }
+
+    state.copy_within(n_input..n_input + n_old_state, 0);
+}
+
+#[inline(always)]
+fn extract_even_iq_f32(src: &[f32]) -> F32s {
+    // 加载 16 个元素 (64 bytes)，通过 swizzle 提取 8 个复数对
+    let s = Simd::<f32, 16>::from_slice(&src[0..16]);
+    simd_swizzle!(
+        s,
+        [0, 1, 4, 5, 8, 9, 12, 13]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use num::{Complex, Zero};
 
     use super::{resample2, resample2_plain};
     //use crate::fir;
-    use crate::{I32s, LANES, fir::fir_coeffs};
+    use crate::{F32s, I32s, LANES8, LANES16, fir::{fir_coeffs, fir_coeffs_f32}, firdec_worker::resample2_f32};
     //use num::Complex;
     //use num::traits::FloatConst;
     //use num::traits::Zero;
@@ -214,6 +291,62 @@ mod tests {
             });
     }
 
+    #[test]
+    fn unit_pulse_complex_f32() {
+        let fir_coeffs = fir_coeffs_f32(); // 假设这是半带滤波器的前一半系数（含中心点）
+
+        // 生成完整的滤波器系数用于比对
+        // 注意：半带滤波器的偶数项（除了中心点）通常为 0
+        let fir_coeffs_full: Vec<f32> = fir_coeffs
+            .iter()
+            .rev()
+            .chain(fir_coeffs.iter().skip(1))
+            .cloned()
+            .collect();
+
+        let n_tap_half = fir_coeffs.len();
+        let m_half = n_tap_half - 1;
+
+        // input 长度 512 个 i16，代表 256 个 Complex
+        let mut input = vec![0f32; N_BATCH];
+
+        // 设置第一个复数为 1 + 1i
+        input[0] = 1.0; // I0
+        input[1] = 1.0; // Q0
+
+        // 状态空间：(ntaps - 1) * 2 是历史复数点占用的 i16 数量
+        let n_old_state = m_half * 2 * 2;
+        let mut state = vec![0f32; n_old_state + N_BATCH];
+
+        // 输出长度减半
+        let mut output = vec![0f32; N_BATCH / 2];
+
+        resample2_f32(&input, &mut output, &fir_coeffs, &mut state);
+
+        // --- 验证逻辑 ---
+        // 对于单位脉冲 [1, 1, 0, 0, ...]，输出应该是滤波器的系数
+        // 但因为是 2:1 降采样，输出只会保留偶数项的响应
+        // 预期输出序列应该是：[h[0], h[0], h[2], h[2], h[4], h[4] ...] (如果脉冲在位置0)
+        // 注意：h[k] 对应 fir_coeffs_full 中的值
+
+        fir_coeffs_full
+            .iter()
+            .step_by(2) // 降采样 2 对应的系数步进
+            .enumerate()
+            .for_each(|(idx, &expected_val)| {
+                let out_re = output[idx * 2]; // 输出的 I
+                let out_im = output[idx * 2 + 1]; // 输出的 Q
+
+                println!(
+                    "TapIdx {}: Expected {}, Got I={}, Q={}",
+                    idx, expected_val, out_re, out_im
+                );
+
+                assert_eq!(out_re, expected_val as f32, "实部不匹配 @ index {}", idx);
+                assert_eq!(out_im, expected_val as f32, "虚部不匹配 @ index {}", idx);
+            });
+    }
+
     
     #[test]
     fn test_segmented_consistency() {
@@ -263,6 +396,70 @@ mod tests {
             &coeff,
             &mut state_b,
             bit_shift,
+        );
+
+        println!("output b: {:?}", output_b);
+
+        // --- 验证结果 ---
+        // 检查 output_a 和 output_b 是否逐元素相等
+        assert_eq!(output_a.len(), output_b.len(), "输出长度不一致");
+        for i in 0..output_a.len() {
+            assert_eq!(
+                output_a[i], output_b[i],
+                "分段处理在索引 {} 处不一致！A: {}, B: {}",
+                i, output_a[i], output_b[i]
+            );
+        }
+        println!("分段等效性测试通过！");
+    }
+
+
+    #[test]
+    fn test_segmented_consistency_f32() {
+        use crate::fir::fir_coeffs; // 假设你的系数生成函数在此
+
+        // 1. 准备参数
+        let coeff = fir_coeffs_f32();
+        let fir_coeffs_f32: Vec<std::simd::Simd<f32, 8>> =
+            coeff.iter().map(|&c| F32s::splat(c as f32)).collect();
+
+        let n_half_taps = coeff.len();
+        let m_half = n_half_taps - 1;
+        let n_old_state = 2 * m_half;
+        let bit_shift = 2; // 示例位移
+
+        // 构造一段足够长的随机输入数据 (必须是 LANES*2 的倍数)
+        let total_input_len = 512;
+        let input: Vec<f32> = (0..total_input_len).map(|x| x as f32).collect();
+
+        // --- 实验组 A: 一次性处理 ---
+        let mut state_a = vec![0f32; n_old_state * 2 + total_input_len];
+        let mut output_a = vec![0f32; total_input_len / 2];
+        resample2_f32(&input, &mut output_a, &coeff, &mut state_a);
+        println!("output a: {:?}", output_a);
+
+        // --- 实验组 B: 分两段处理 ---
+        let mut state_b = vec![0f32; n_old_state * 2 + total_input_len / 2]; // 状态空间需足够容纳单次输入
+        let mut output_b = vec![0f32; total_input_len / 2];
+
+        let mid_input = total_input_len / 2; // 从中间切分
+        let mid_output = mid_input / 2;
+
+        // 第一段：处理前一半
+        // 注意：state 的长度在 resample2 中有断言检查，传入的 state 切片长度必须符合约定
+        resample2_f32(
+            &input[..mid_input],
+            &mut output_b[..mid_output],
+            &coeff,
+            &mut state_b
+        );
+
+        // 第二段：处理后一半 (此时 state_b 内部已经自动完成了 copy_within)
+        resample2_f32(
+            &input[mid_input..],
+            &mut output_b[mid_output..],
+            &coeff,
+            &mut state_b
         );
 
         println!("output b: {:?}", output_b);
